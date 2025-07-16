@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+        exclude:
+          # 排除一些不常用的组合
+          - goos: windows
+            goarch: arm64
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.23'
+
+    - name: Get dependencies
+      run: go mod download
+
+    - name: Build binary
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+      run: |
+        # 设置二进制文件名
+        BINARY_NAME="bu"
+        if [ "$GOOS" = "windows" ]; then
+          BINARY_NAME="${BINARY_NAME}.exe"
+        fi
+        
+        # 构建二进制文件
+        go build -ldflags="-s -w" -o ${BINARY_NAME} .
+        
+        # 创建发布包
+        PACKAGE_NAME="bu-${GOOS}-${GOARCH}"
+        if [ "$GOOS" = "windows" ]; then
+          PACKAGE_NAME="${PACKAGE_NAME}.zip"
+          zip ${PACKAGE_NAME} ${BINARY_NAME} README.md
+        else
+          PACKAGE_NAME="${PACKAGE_NAME}.tar.gz"
+          tar -czf ${PACKAGE_NAME} ${BINARY_NAME} README.md
+        fi
+        
+        # 输出包名供后续步骤使用
+        echo "PACKAGE_NAME=${PACKAGE_NAME}" >> $GITHUB_ENV
+        echo "BINARY_NAME=${BINARY_NAME}" >> $GITHUB_ENV
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ env.PACKAGE_NAME }}
+        path: ${{ env.PACKAGE_NAME }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: ./artifacts
+
+    - name: Prepare release assets
+      run: |
+        mkdir -p ./release-assets
+        find ./artifacts -name "*.tar.gz" -o -name "*.zip" | while read file; do
+          cp "$file" ./release-assets/
+        done
+        ls -la ./release-assets/
+
+    - name: Extract version from tag
+      id: version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ steps.version.outputs.VERSION }}
+        body: |
+          ## 🚀 Release ${{ steps.version.outputs.VERSION }}
+          
+          ### 📦 下载
+          
+          选择适合您操作系统的版本：
+          
+          - **Linux (x64)**: bu-linux-amd64.tar.gz
+          - **Linux (ARM64)**: bu-linux-arm64.tar.gz
+          - **macOS (Intel)**: bu-darwin-amd64.tar.gz
+          - **macOS (Apple Silicon)**: bu-darwin-arm64.tar.gz
+          - **Windows (x64)**: bu-windows-amd64.zip
+          
+          ### 📋 使用方法
+          
+          1. 下载对应平台的压缩包
+          2. 解压到目标目录
+          3. 将二进制文件添加到 PATH 环境变量
+          4. 运行 `bu --help` 查看使用说明
+          
+          ### ✨ 主要功能
+          
+          - 🎯 基于 Go template 的模板渲染
+          - 📄 支持多种数据输入方式（JSON 文件、命令行字符串、变量设置）
+          - 🔧 跨平台命令行工具
+          - 💾 支持输出到文件或标准输出
+        draft: false
+        prerelease: false
+
+    - name: Upload Release Assets
+      run: |
+        for file in ./release-assets/*; do
+          if [ -f "$file" ]; then
+            filename=$(basename "$file")
+            echo "Uploading $filename..."
+            curl -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$file" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ steps.create_release.outputs.id }}/assets?name=$filename"
+          fi
+        done
